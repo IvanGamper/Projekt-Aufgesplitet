@@ -7,16 +7,27 @@ STATI = ["Neu", "In Bearbeitung", "Warten auf Benutzer", "Gelöst", "Geschlossen
 PRIO  = ["Niedrig", "Normal", "Hoch", "Kritisch"]
 CATS  = ["Hardware", "Software", "Netzwerk", "Sonstiges"]
 
-STATUS_COLORS = {"Neu":"🔵","In Bearbeitung":"🟡","Warten auf Benutzer":"🟠","Gelöst":"🟢","Geschlossen":"⚫"}
-PRIO_COLORS   = {"Niedrig":"🟢","Normal":"🟡","Hoch":"🟠","Kritisch":"🔴"}
+STATUS_COLORS = {
+    "Neu": "🔵",
+    "In Bearbeitung": "🟡",
+    "Warten auf Benutzer": "🟠",
+    "Gelöst": "🟢",
+    "Geschlossen": "⚫"
+}
+
+PRIO_COLORS = {
+    "Niedrig": "🟢",
+    "Normal": "🟡",
+    "Hoch": "🟠",
+    "Kritisch": "🔴"
+}
 
 # --------- Utils ----------
 def now_utc_str():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 def format_datetime(dt_str):
-    if not dt_str:
-        return "—"
+    if not dt_str: return "—"
     try:
         dt = datetime.fromisoformat(str(dt_str).replace('Z', '+00:00'))
         return dt.strftime("%d.%m.%Y %H:%M")
@@ -24,32 +35,24 @@ def format_datetime(dt_str):
         return str(dt_str)
 
 def safe_index(options, value, default=0):
-    try:
-        return options.index(value)
-    except Exception:
-        return default
+    return options.index(value) if value in options else default
 
-def next_status(s: str) -> str:
-    try:
-        i = STATI.index(s)
-        return STATI[min(i + 1, len(STATI) - 1)]
-    except ValueError:
-        return s
 
-def prev_status(s: str) -> str:
-    try:
-        i = STATI.index(s)
-        return STATI[max(i - 1, 0)]
-    except ValueError:
-        return s
+def next_status(s):
+    return STATI[min(STATI.index(s) + 1, len(STATI) - 1)] if s in STATI else s
+
+def prev_status(s):
+    return STATI[max(STATI.index(s) - 1, 0)] if s in STATI else s
 
 # --------- Security ----------
 def hash_pw_bcrypt(password: str) -> str:
+    """Erzeugt bcrypt-Hash als UTF-8-String."""
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 def verify_pw_bcrypt(password: str, stored_hash: str) -> bool:
+    """Prüft Passwort gegen gespeicherten bcrypt-Hash."""
     try:
-        return bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8"))
+        return bcrypt.checkpw(password.encode(), stored_hash.encode())
     except Exception:
         return False
 
@@ -59,9 +62,8 @@ def get_user_by_username(username: str):
         "SELECT id, username, role, password_hash, active FROM users WHERE username=%s",
         (username.strip(),)
     )
-    if not rows or rows[0]["active"] != 1:
-        return None
-    return rows[0]
+    return rows[0] if rows and rows[0]["active"] == 1 else None
+
 
 def login_user(username: str, password: str):
     u = get_user_by_username(username.strip())
@@ -93,16 +95,23 @@ def create_ticket(title, description, category, priority, creator_id):
     )
 
 def fetch_tickets(creator_id=None, archived=False, search_term=None, category=None, priority=None):
-    params, where = [], []
-    if not archived: where.append("t.archived = 0")
-    if creator_id is not None: where.append("t.creator_id = %s"); params.append(creator_id)
+    where, params = [], []
+    if not archived:
+        where.append("t.archived = 0")
+    if creator_id:
+        where.append("t.creator_id = %s")
+        params.append(creator_id)
     if search_term:
         where.append("(t.title LIKE %s OR t.description LIKE %s)")
-        params.extend([f"%{search_term}%", f"%{search_term}%"])
-    if category and category != "Alle": where.append("t.category = %s"); params.append(category)
-    if priority and priority != "Alle": where.append("t.priority = %s"); params.append(priority)
+        params += [f"%{search_term}%", f"%{search_term}%"]
+    if category and category != "Alle":
+        where.append("t.category = %s")
+        params.append(category)
+    if priority and priority != "Alle":
+        where.append("t.priority = %s")
+        params.append(priority)
 
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     sql = f"""
         SELECT t.*, u.username AS creator_name, a.username AS assignee_name
         FROM tickets t
@@ -113,12 +122,14 @@ def fetch_tickets(creator_id=None, archived=False, search_term=None, category=No
     """
     return query_fetchall(sql, tuple(params))
 
+
+
 def update_ticket(tid, **fields):
     if not fields: return
-    fields.setdefault("updated_at", now_utc_str())
-    set_clause = ", ".join(f"{k}=%s" for k in fields.keys())
-    params = list(fields.values()) + [tid]
-    query_execute(f"UPDATE tickets SET {set_clause} WHERE id=%s", tuple(params))
+    fields["updated_at"] = now_utc_str()
+    set_clause = ", ".join(f"{k}=%s" for k in fields)
+    query_execute(f"UPDATE tickets SET {set_clause} WHERE id=%s", (*fields.values(), tid))
+
 
 def get_ticket_stats():
     stats = query_fetchall("""

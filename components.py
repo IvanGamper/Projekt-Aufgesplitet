@@ -1,13 +1,11 @@
-# components.py
 import streamlit as st
 from services import (
-    STATI, STATUS_COLORS, PRIO_COLORS,
+    STATI, PRIO, CATS, STATUS_COLORS, PRIO_COLORS,
     format_datetime, now_utc_str, next_status, prev_status,
     list_users, update_ticket
 )
 
 def show_stats(get_ticket_stats_fn):
-    """Zeigt die Metriken (Stats oben). Übergib get_ticket_stats aus services per Funktions-Ref."""
     stats = get_ticket_stats_fn()
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Gesamt", stats.get('total', 0))
@@ -18,9 +16,11 @@ def show_stats(get_ticket_stats_fn):
     st.divider()
 
 def kanban_card(t: dict):
-    st.markdown(f"{STATUS_COLORS.get(t.get('status',''),'⚪')} "
-                f"{PRIO_COLORS.get(t.get('priority',''),'⚪')} "
-                f"**#{t['id']} — {t['title']}**")
+    st.markdown(
+        f"{STATUS_COLORS.get(t.get('status',''),'⚪')} "
+        f"{PRIO_COLORS.get(t.get('priority',''),'⚪')} "
+        f"**#{t['id']} — {t['title']}**"
+    )
     st.caption(f"📁 {t.get('category','-')} • ⏰ {format_datetime(t.get('updated_at'))}")
     desc = t.get('description') or ''
     st.write(desc[:150] + ("…" if len(desc) > 150 else ""))

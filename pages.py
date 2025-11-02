@@ -1,11 +1,8 @@
-# pages.py
 import streamlit as st
 import pandas as pd
-from services import (
-    STATI, PRIO, CATS, safe_index,
+from services import (STATI, PRIO, CATS, safe_index,
     login_user, list_users, create_user, deactivate_user,
-    create_ticket, fetch_tickets, get_ticket_stats
-)
+    create_ticket, fetch_tickets, get_ticket_stats)
 from components import show_stats, render_ticket_column, get_user_map_and_ids
 
 def page_create_ticket():
@@ -17,11 +14,13 @@ def page_create_ticket():
         cat = col1.selectbox("📁 Kategorie", CATS)
         prio = col2.selectbox("⚠️ Priorität", PRIO, index=1)
         if st.form_submit_button("✅ Ticket anlegen", use_container_width=True):
-            if not title.strip() or not desc.strip():
+            if not title or not desc:
                 st.error("❌ Titel und Beschreibung dürfen nicht leer sein.")
             else:
                 create_ticket(title.strip(), desc.strip(), cat, prio, st.session_state.user_id)
-                st.success("✅ Ticket angelegt!"); st.balloons(); st.rerun()
+                st.success("✅ Ticket angelegt!")
+                st.balloons()
+                st.rerun()
 
 
 
