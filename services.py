@@ -1,4 +1,3 @@
-# services.py
 from datetime import datetime, timezone
 import bcrypt
 from db import query_fetchall, query_execute

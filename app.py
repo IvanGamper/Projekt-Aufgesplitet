@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 from services import (
@@ -211,25 +210,24 @@ def page_admin_dashboard():
                 st.success(f"✅ Benutzer '{victim['username']}' wurde deaktiviert.")
                 st.rerun()
 
-def page_profile():
-    st.header("👤 Profil")
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.markdown(f"### Angemeldet als\n\n**Benutzername:** {st.session_state.username}\n\n**Rolle:** {st.session_state.role}")
-        if st.button("🚪 Logout", use_container_width=True, type="primary"):
-            for k in ["user_id", "role", "username"]: st.session_state.pop(k, None)
-            st.success("✅ Erfolgreich abgemeldet!"); st.rerun()
-
 # -------- App-Flow --------
 def show_sidebar():
     user = st.session_state.get("username", "Unbekannt")
     role = st.session_state.get("role", "user")
+
     st.sidebar.title("🎫 Ticketsystem")
     st.sidebar.markdown(f"**Angemeldet als:** {user} ({role})")
     st.sidebar.divider()
 
+    # Logout direkt in der Sidebar
+    if st.sidebar.button("🚪 Logout", use_container_width=True, type="primary"):
+        for k in ["user_id", "role", "username"]:
+            st.session_state.pop(k, None)
+        st.sidebar.success("✅ Abgemeldet!")
+        st.rerun()
+
 def get_pages(role: str) -> dict:
-    pages = {"🎫 Kanban-Board": page_kanban, "➕ Ticket erstellen": page_create_ticket, "👤 Profil": page_profile}
+    pages = {"🎫 Kanban-Board": page_kanban, "➕ Ticket erstellen": page_create_ticket}
     if role == "admin":
         pages["🛠️ Verwaltung"] = page_admin_dashboard
     return pages
