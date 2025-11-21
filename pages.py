@@ -22,8 +22,6 @@ def page_create_ticket():
                 st.balloons()
                 st.rerun()
 
-
-
 def page_login():
     st.title("🎫 Ticketsystem Login")
     col1, col2, col3 = st.columns([1, 2, 1])

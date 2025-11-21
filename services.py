@@ -64,7 +64,6 @@ def get_user_by_username(username: str):
     )
     return rows[0] if rows and rows[0]["active"] == 1 else None
 
-
 def login_user(username: str, password: str):
     u = get_user_by_username(username.strip())
     if not u:
@@ -122,14 +121,11 @@ def fetch_tickets(creator_id=None, archived=False, search_term=None, category=No
     """
     return query_fetchall(sql, tuple(params))
 
-
-
 def update_ticket(tid, **fields):
     if not fields: return
     fields["updated_at"] = now_utc_str()
     set_clause = ", ".join(f"{k}=%s" for k in fields)
     query_execute(f"UPDATE tickets SET {set_clause} WHERE id=%s", (*fields.values(), tid))
-
 
 def get_ticket_stats():
     stats = query_fetchall("""
