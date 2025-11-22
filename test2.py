@@ -1,27 +1,23 @@
-+
+# app_nosql.py
 import os
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import bcrypt
 import pandas as pd
-import pymysql
 import streamlit as st
 
+# TinyDB für lokale NoSQL-Variante
+try:
+    from tinydb import TinyDB, Query
+    from tinydb.operations import delete
+except Exception as e:
+    raise RuntimeError("Bitte installiere tinydb: pip install tinydb") from e
+
 # --------------------
-# Konfiguration (gleich wie vorher)
+# Konfiguration
 # --------------------
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "127.0.0.1"),
-    "port": int(os.getenv("DB_PORT", 3306)),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", "Xyz1343!!!"),
-    "database": os.getenv("DB_NAME", "ticketsystemabkoo1"),
-    "charset": "utf8mb4",
-    "cursorclass": pymysql.cursors.DictCursor,
-    "autocommit": False,
-}
+DB_JSON_PATH = os.getenv("TINYDB_PATH", "tickets_nosql.json")
 
 STATI = ["Neu", "In Bearbeitung", "Warten auf Benutzer", "Gelöst", "Geschlossen"]
 PRIO = ["Niedrig", "Normal", "Hoch", "Kritisch"]
@@ -43,30 +39,189 @@ PRIO_COLORS = {
 }
 
 # --------------------
-# Infrastruktur
+# TinyDB Wrapper
 # --------------------
-class DBConnection:
-    """Kontextmanager für DB-Verbindung (Commit/Rollback automatisch)."""
+class NoSqlDB:
+    """Einfacher TinyDB-Wrapper mit Tables: users, tickets"""
+    def __init__(self, path: str = DB_JSON_PATH):
+        self.path = path
+        self.db = TinyDB(self.path)
+        # Tabellen
+        self.users = self.db.table("users")
+        self.tickets = self.db.table("tickets")
 
-    def __init__(self, config: dict = DB_CONFIG):
-        self.config = config
-        self.conn = None
+    # Hilfs: konvertiere TinyDB doc (mit doc_id) in dict mit "id"
+    @staticmethod
+    def _doc_to_row(doc: dict, doc_id: int) -> dict:
+        row = dict(doc)
+        row["id"] = doc_id
+        return row
 
-    def __enter__(self):
-        self.conn = pymysql.connect(**self.config)
-        return self.conn
+    # users
+    def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        q = Query()
+        rows = self.users.search(q.username == username.strip())
+        if not rows:
+            return None
+        # Active prüfen (wenn Feld fehlt => aktiv)
+        doc = rows[0]
+        doc_id = self._find_doc_id(self.users, doc)
+        if doc.get("active", 1) != 1:
+            return None
+        return self._doc_to_row(doc, doc_id)
 
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            if exc_type is None:
-                self.conn.commit()
+    def create_user(self, username: str, password_hash: str, role: str = "user") -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        doc = {
+            "username": username,
+            "password_hash": password_hash,
+            "role": role,
+            "active": 1,
+            "created_at": now,
+            "deleted_at": None
+        }
+        doc_id = self.users.insert(doc)
+        return doc_id
+
+    def list_active_users(self) -> List[Dict[str, Any]]:
+        q = Query()
+        rows = self.users.search(q.active == 1)
+        # convert to include id
+        result = []
+        for r in rows:
+            doc_id = self._find_doc_id(self.users, r)
+            result.append(self._doc_to_row(r, doc_id))
+        # sort by username
+        result.sort(key=lambda x: x.get("username",""))
+        return result
+
+    def deactivate_user(self, user_id: int):
+        # TinyDB document IDs are integers (doc_id)
+        self.users.update({"active": 0, "deleted_at": datetime.now(timezone.utc).isoformat()}, doc_ids=[user_id])
+
+    # tickets
+    def create_ticket(self, title: str, description: str, category: str, priority: str, creator_id: int) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        doc = {
+            "title": title,
+            "description": description,
+            "category": category,
+            "status": "Neu",
+            "priority": priority,
+            "creator_id": creator_id,
+            "assignee_id": None,
+            "created_at": now,
+            "updated_at": now,
+            "archived": 0
+        }
+        return self.tickets.insert(doc)
+
+    def fetch_tickets(self,
+                      creator_id: Optional[int] = None,
+                      archived: bool = False,
+                      search_term: Optional[str] = None,
+                      category: Optional[str] = None,
+                      priority: Optional[str] = None) -> List[Dict[str, Any]]:
+        all_rows = self.tickets.all()
+        results = []
+        for r in all_rows:
+            # apply archived filter
+            if archived:
+                ok_arch = bool(r.get("archived", 0))
             else:
-                self.conn.rollback()
-        finally:
-            self.conn.close()
+                ok_arch = (r.get("archived", 0) == 0)
+            if not ok_arch:
+                continue
+            if creator_id is not None and r.get("creator_id") != creator_id:
+                continue
+            if search_term:
+                s = search_term.lower()
+                if s not in (r.get("title","").lower() + " " + r.get("description","").lower()):
+                    continue
+            if category and category != "Alle" and r.get("category") != category:
+                continue
+            if priority and priority != "Alle" and r.get("priority") != priority:
+                continue
+            doc_id = self._find_doc_id(self.tickets, r)
+            results.append(self._doc_to_row(r, doc_id))
+        # order by updated_at desc (ISO timestamps sort lexicographically)
+        results.sort(key=lambda x: x.get("updated_at",""), reverse=True)
+        return results
+
+    def update_ticket(self, ticket_id: int, fields: Dict[str, Any]):
+        if not fields:
+            return
+        fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self.tickets.update(fields, doc_ids=[ticket_id])
+
+    def fetch_all_tickets_raw(self, archived: bool = False) -> List[Dict[str, Any]]:
+        rows = self.fetch_tickets(archived=archived)
+        return rows
+
+    def stats(self) -> Dict[str, int]:
+        rows = self.fetch_tickets(archived=True) + self.fetch_tickets(archived=False)
+        total = len(rows)
+        neue = len([r for r in rows if r.get("status") == "Neu"])
+        in_bear = len([r for r in rows if r.get("status") == "In Bearbeitung"])
+        geloest = len([r for r in rows if r.get("status") == "Gelöst"])
+        archiviert = len([r for r in rows if r.get("archived",0) == 1])
+        return {"total": total, "neue": neue, "in_bearbeitung": in_bear, "geloest": geloest, "archiviert": archiviert}
+
+    from tinydb import Query
+
+    from tinydb import Query
+
+    def _find_doc_id(self, table, doc):
+        """
+        Versucht robust die TinyDB doc_id zu finden.
+        - Prüft zuerst nach old_id (falls importiert)
+        - Dann nach eindeutigen Feldern (username für users, title+created_at für tickets)
+        - Dann Full-/Subset-Match als Fallback
+        Liefert doc_id (int) oder None.
+        """
+        q = Query()
+
+        # 1) old_id (am stabilsten bei Migration)
+        if doc.get("old_id") is not None:
+            res = table.search(q.old_id == doc["old_id"])
+            if res:
+                # Iteriere table (Document-Objekte) um doc_id zu bekommen
+                for item in table:
+                    if item.get("old_id") == doc["old_id"]:
+                        return item.doc_id
+
+        # 2) username (User-lookup)
+        if "username" in doc:
+            res = table.search(q.username == doc["username"])
+            if res:
+                for item in table:
+                    if item.get("username") == doc["username"]:
+                        return item.doc_id
+
+        # 3) title + created_at (Ticket-lookup)
+        if "title" in doc and "created_at" in doc:
+            res = table.search((q.title == doc["title"]) & (q.created_at == doc["created_at"]))
+            if res:
+                for item in table:
+                    if item.get("title") == doc["title"] and item.get("created_at") == doc["created_at"]:
+                        return item.doc_id
+
+        # 4) Fallback: try subset equality (best-effort)
+        for item in table:
+            # only compare keys that exist in both
+            common_keys = [k for k in doc.keys() if k in item]
+            if common_keys and all(item.get(k) == doc.get(k) for k in common_keys):
+                return item.doc_id
+
+        return None
+
+
+
+# global DB instance
+NOSQL = NoSqlDB()
 
 # --------------------
-# Hilfsfunktionen (als Modul-Utilities)
+# Utility-Functions (gleich wie vorher)
 # --------------------
 def hash_pw_bcrypt(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -107,140 +262,54 @@ def format_datetime(dt_str):
         return str(dt_str)
 
 # --------------------
-# Repositories (Data Access)
+# Repositories (NoSQL-Variante)
 # --------------------
 class UserRepository:
-    """DB-Zugriffe für users-Tabelle."""
-
+    """NoSQL-Repos über TinyDB"""
     @staticmethod
     def get_by_username(username: str) -> Optional[Dict[str, Any]]:
-        sql = "SELECT id, username, role, password_hash, active FROM users WHERE username=%s"
-        with DBConnection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (username.strip(),))
-                rows = cur.fetchall()
-        if not rows or rows[0].get("active") != 1:
-            return None
-        return rows[0]
+        return NOSQL.get_user_by_username(username)
 
     @staticmethod
     def create(username: str, password_hash: str, role: str = "user") -> int:
-        sql = "INSERT INTO users (username, password_hash, role) VALUES (%s,%s,%s)"
-        with DBConnection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (username, password_hash, role))
-                return getattr(cur, "lastrowid", 0) or 0
+        return NOSQL.create_user(username, password_hash, role)
 
     @staticmethod
     def list_active() -> List[Dict[str, Any]]:
-        sql = "SELECT id, username, role FROM users WHERE active=1 ORDER BY username"
-        with DBConnection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                return cur.fetchall()
+        return NOSQL.list_active_users()
 
     @staticmethod
     def deactivate(user_id: int):
-        sql = "UPDATE users SET active=0, deleted_at=NOW() WHERE id=%s"
-        with DBConnection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (user_id,))
+        NOSQL.deactivate_user(user_id)
 
 class TicketRepository:
-    """DB-Zugriffe für tickets-Tabelle."""
-
+    """NoSQL-Repos über TinyDB"""
     @staticmethod
     def create(title: str, description: str, category: str, priority: str, creator_id: int) -> int:
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        sql = (
-            "INSERT INTO tickets"
-            " (title, description, category, status, priority, creator_id, created_at, updated_at, archived)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,0)"
-        )
-        with DBConnection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (title, description, category, "Neu", priority, creator_id, now, now))
-                return getattr(cur, "lastrowid", 0) or 0
+        return NOSQL.create_ticket(title, description, category, priority, creator_id)
 
     @staticmethod
     def fetch(creator_id: Optional[int] = None, archived: bool = False,
               search_term: Optional[str] = None, category: Optional[str] = None,
               priority: Optional[str] = None) -> List[Dict[str, Any]]:
-        params: List[Any] = []
-        where: List[str] = []
-
-        if not archived:
-            where.append("t.archived = 0")
-        if creator_id is not None:
-            where.append("t.creator_id = %s")
-            params.append(creator_id)
-        if search_term:
-            where.append("(t.title LIKE %s OR t.description LIKE %s)")
-            params.extend([f"%{search_term}%", f"%{search_term}%"])
-        if category and category != "Alle":
-            where.append("t.category = %s")
-            params.append(category)
-        if priority and priority != "Alle":
-            where.append("t.priority = %s")
-            params.append(priority)
-
-        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-        sql = f"""
-            SELECT t.*, u.username AS creator_name, a.username AS assignee_name
-            FROM tickets t
-            JOIN users u ON u.id = t.creator_id
-            LEFT JOIN users a ON a.id = t.assignee_id
-            {where_sql}
-            ORDER BY t.updated_at DESC
-        """
-        with DBConnection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, tuple(params))
-                return cur.fetchall()
+        return NOSQL.fetch_tickets(creator_id, archived, search_term, category, priority)
 
     @staticmethod
     def update(ticket_id: int, fields: Dict[str, Any]):
-        if not fields:
-            return
-        fields["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        set_clause = ", ".join(f"{k}=%s" for k in fields.keys())
-        params = list(fields.values()) + [ticket_id]
-        sql = f"UPDATE tickets SET {set_clause} WHERE id=%s"
-        with DBConnection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, tuple(params))
+        return NOSQL.update_ticket(ticket_id, fields)
 
     @staticmethod
     def fetch_all_raw(archived: bool = False) -> List[Dict[str, Any]]:
-        sql = "SELECT * FROM tickets " + ("WHERE archived=1 " if archived else "") + "ORDER BY updated_at DESC"
-        with DBConnection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                return cur.fetchall()
+        return NOSQL.fetch_all_tickets_raw(archived)
 
     @staticmethod
     def stats() -> Dict[str, int]:
-        sql = """
-            SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN status = 'Neu' THEN 1 ELSE 0 END) as neue,
-                SUM(CASE WHEN status = 'In Bearbeitung' THEN 1 ELSE 0 END) as in_bearbeitung,
-                SUM(CASE WHEN status = 'Gelöst' THEN 1 ELSE 0 END) as geloest,
-                SUM(CASE WHEN archived = 1 THEN 1 ELSE 0 END) as archiviert
-            FROM tickets
-        """
-        with DBConnection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                rows = cur.fetchall()
-                return rows[0] if rows else {}
+        return NOSQL.stats()
 
 # --------------------
-# Services (Business Logic)
+# Services (wie vorher)
 # --------------------
 class AuthService:
-    """Kapselt Login/Benutzererstellung."""
-
     @staticmethod
     def login(username: str, password: str) -> Optional[Dict[str, Any]]:
         u = UserRepository.get_by_username(username.strip())
@@ -256,8 +325,6 @@ class AuthService:
         return UserRepository.create(username, pw_hash, role)
 
 class TicketService:
-    """Ticket-bezogene Geschäftslogik (Erstellen, Listen, Updaten)."""
-
     @staticmethod
     def create_ticket(title: str, description: str, category: str, priority: str, creator_id: int) -> int:
         return TicketRepository.create(title, description, category, priority, creator_id)
@@ -277,14 +344,11 @@ class TicketService:
         return TicketRepository.stats()
 
 # --------------------
-# App UI (Streamlit) - kapselt Seiten als Methoden
+# UI (Streamlit) - nahezu unverändert
 # --------------------
 class AppUI:
-    """Präsentationsschicht: alle page_*-Funktionen als Methoden."""
-
     def __init__(self):
-        st.set_page_config(page_title="Ticketsystem", layout="wide", page_icon="🎫", initial_sidebar_state="expanded")
-        # kleine CSS-Politur
+        st.set_page_config(page_title="Ticketsystem (NoSQL)", layout="wide", page_icon="🎫", initial_sidebar_state="expanded")
         st.markdown("""
             <style>
             .stButton button { border-radius: 5px; }
@@ -292,7 +356,6 @@ class AppUI:
             </style>
         """, unsafe_allow_html=True)
 
-    # ---- UI-Helfer ----
     def show_stats(self):
         stats = TicketService.stats()
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -310,11 +373,10 @@ class AppUI:
         st.caption(f"📁 {t.get('category','-')} • ⏰ {format_datetime(t.get('updated_at'))}")
         desc = t.get('description') or ''
         st.write(desc[:150] + ("…" if len(desc) > 150 else ""))
-        st.caption(f"👤 {t.get('creator_name','?')} → 👨‍💼 {t.get('assignee_name','—') or 'Nicht zugewiesen'}")
+        st.caption(f"👤 {t.get('creator_id','?')} → 👨‍💼 {t.get('assignee_id','—') or 'Nicht zugewiesen'}")
 
-    # ---- Pages ----
     def page_login(self):
-        st.title("🎫 Ticketsystem Login")
+        st.title("🎫 Ticketsystem Login (NoSQL)")
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             with st.form("login_form"):
@@ -394,11 +456,11 @@ class AppUI:
 
                         with c1:
                             if st.button("⬅️", key=f"left_{t['id']}", help="Vorheriger Status"):
-                                TicketService.update_ticket(t["id"], status=prev_status(t["status"]))
+                                TicketService.update_ticket(t["id"], {"status": prev_status(t["status"])})
                                 st.rerun()
                         with c2:
                             if st.button("➡️", key=f"right_{t['id']}", help="Nächster Status"):
-                                TicketService.update_ticket(t["id"], status=next_status(t["status"]))
+                                TicketService.update_ticket(t["id"], {"status": next_status(t["status"])})
                                 st.rerun()
 
                         cur = t.get("assignee_id")
@@ -425,7 +487,6 @@ class AppUI:
                             st.rerun()
 
     def page_admin(self):
-        """Admin: Tickets verwalten (wie ursprünglich)."""
         st.header("🔧 Admin: Tickets verwalten")
 
         show_arch = st.checkbox("📦 Archivierte anzeigen")
@@ -448,7 +509,7 @@ class AppUI:
                 st.caption(f"Erstellt: {format_datetime(t.get('created_at'))} | "
                            f"Aktualisiert: {format_datetime(t.get('updated_at'))}")
                 st.write(t.get("description", ""))
-                st.caption(f"Von: {t.get('creator_name','?')} → Bearbeiter: {t.get('assignee_name','-') or '-'}")
+                st.caption(f"Von: {t.get('creator_id','?')} → Bearbeiter: {t.get('assignee_id','-') or '-'}")
 
                 st.divider()
 
@@ -472,8 +533,7 @@ class AppUI:
                     st.rerun()
 
     def page_database(self):
-        """DB-Verwaltung / Benutzer (wie zuvor)."""
-        st.header("🗄️ Datenbank (Admin)")
+        st.header("🗄️ Datenbank (NoSQL)")
         tab1, tab2 = st.tabs(["👥 Benutzer", "🎫 Tickets"])
 
         with tab1:
@@ -538,18 +598,15 @@ class AppUI:
                 st.rerun()
 
 # --------------------
-# Main: Navigation (Sidebar with 3 items)
+# Main
 # --------------------
 def main():
     ui = AppUI()
-
-    # Login-Check
     if "user_id" not in st.session_state:
         ui.page_login()
         return
 
-    # Sidebar Navigation (wie gewünscht: seitlich)
-    st.sidebar.title("🎫 Ticketsystem")
+    st.sidebar.title("🎫 Ticketsystem (NoSQL)")
     st.sidebar.markdown(f"**👤 Benutzer:**  {st.session_state.get('username','-')}")
     st.sidebar.markdown(f"**🛡️ Rolle:**  {st.session_state.get('role','-')}")
     st.sidebar.divider()
@@ -565,13 +622,11 @@ def main():
             st.session_state.pop(k, None)
         st.rerun()
 
-    # Render pages
     if choice == "📋 Kanban-Board":
         ui.page_kanban()
     elif choice == "➕ Ticket erstellen":
         ui.page_create_ticket()
     elif choice == "🛠️ Verwaltung":
-        # Verwaltung mit zwei Subtabs (Tickets, Benutzer) wie zuvor
         sub = st.radio("Verwaltungsbereich", ["🎫 Tickets", "👥 Benutzer"], horizontal=True)
         if sub == "🎫 Tickets":
             ui.page_admin()
