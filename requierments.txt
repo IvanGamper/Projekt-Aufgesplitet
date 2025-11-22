@@ -1,0 +1,8 @@
+streamlit
+tinydb
+passlib[bcrypt]
+pandas
+python-dotenv
+matplotlib
+bcrypt==4.1.2
+pytz
